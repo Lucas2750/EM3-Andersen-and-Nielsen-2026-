@@ -1,0 +1,416 @@
+---
+title: "EM3_Databehandling"
+author: "Lucas"
+date: "2026-04-14"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+# Installer tidyverse hvis i ikke har den: install.packages("tidyverse")
+library(tidyverse)
+
+# ==========================================
+# 1. INDLÆS ALLE CSV-FILER FRA EN MAPPE
+# ==========================================
+# Skift stien herunder ("./data") til stien på den mappe, hvor I gemmer jeres csv-filer. 
+# "./" betyder bare "den mappe som dette R-script ligger i".
+mappe_sti <- "C:/Users/lundb/OneDrive/Skrivebord/KU/4. Semester/EM3/Projekt/Data"
+
+# Find alle filer der slutter på .csv
+filer <- list.files(path = mappe_sti, pattern = "\\.csv$", full.names = TRUE)
+
+# Indlæs dem alle og bind dem sammen til ét stort datasæt
+df <- filer %>% map_dfr(read_csv, show_col_types = FALSE)
+
+# ==========================================
+# 2. DATA CLEANING & KATEGORISERING
+# ==========================================
+
+df <- df %>%
+  mutate(
+    # Tving til logiske værdier
+    dynamic = as.logical(toupper(dynamic)),
+    static  = as.logical(toupper(static)),
+    correct = as.logical(toupper(correct)),
+    av = as.logical(toupper(av)),
+    sv = as.logical(toupper(sv)),
+    as = as.logical(toupper(as)),
+    
+    # Kategori: Blok Type (Static vs Dynamic)
+    block_type = case_when(
+      dynamic == TRUE ~ "Dynamic",
+      static == TRUE  ~ "Static",
+      TRUE            ~ "Unknown"
+    ),
+    
+    # NY Kategori: Fase i eksperimentet (Blok 1-12 vs 13-24)
+    # Dette adskiller Single Deviant blokke fra Multimodale blokke
+    block_phase = if_else(block_num <= 12, "Phase 1: Single Deviant", "Phase 2: Multimodal (All Deviants)"),
+    
+    # OPDATERET Kategori: Deviant Muligheder i blokken
+    deviant_possible = case_when(
+      # De sidste 12 blokke har alle tre:
+      av & sv & as ~ "All Deviants (AV+SV+AS)",
+      # De første 12 blokke har kun én af gangen:
+      av           ~ "Audio-Visuel (AV)",
+      sv           ~ "Standard-Visuel (SV)",
+      as           ~ "Audio-Standard (AS)",
+      TRUE         ~ "Ingen / Ukendt"
+    )
+  ) %>%
+  filter(!is.na(response), !is.na(correct))
+
+# Funktion til at udregne Shannon Entropi
+calc_entropy <- function(x) {
+  p <- table(x) / length(x)
+  p <- p[p > 0] # Fjern 0 for at undgå log2(0) fejl
+  return(-sum(p * log2(p)))
+}
+
+# Funktion til at udregne løbende (kumulativ) entropi pr. trial
+calc_running_entropy <- function(x) {
+  sapply(1:length(x), function(i) {
+    # Tag alle trials fra starten af blokken op til nuværende trial (i)
+    current_seq <- x[1:i]
+    current_seq <- current_seq[!is.na(current_seq)] # Fjern eventuelle NAs
+    
+    # Hvis der ikke er noget data endnu, returner NA
+    if(length(current_seq) == 0) return(NA)
+    
+    # Udregn fordeling og entropi ligesom i din anden funktion
+    p <- table(current_seq) / length(current_seq)
+    p <- p[p > 0]
+    return(-sum(p * log2(p)))
+  })
+}
+```
+
+```{r}
+# ==========================================
+# DEL 1: SHANNON ENTROPI af blokke
+# ==========================================
+
+# Entropi pr. enkelt blok
+entropy_per_block <- df %>%
+  group_by(participant_id, block_num) %>%
+  summarise(entropy = calc_entropy(state), .groups = "drop")
+
+# Entropi pr. block type (Static vs. Dynamic)
+entropy_per_type <- df %>%
+  group_by(block_type) %>%
+  summarise(entropy = calc_entropy(state), .groups = "drop")
+
+# Entropi samlet for hele forsøget
+entropy_total <- df %>%
+  summarise(entropy = calc_entropy(state))
+```
+
+```{r}
+# ==========================================
+# Del 2. ANALYSE AF ENTROPI (FORSØGSPERSONENS GÆT / RESPONS)
+# ==========================================
+
+# Entropi af gæt pr. enkelt blok
+guess_entropy_block <- df %>%
+  group_by(participant_id, block_num, block_type) %>%
+  summarise(entropy_guess = calc_entropy(response), .groups = "drop")
+
+# Entropi af gæt på tværs af Static vs Dynamic
+guess_entropy_type <- df %>%
+  group_by(block_type) %>%
+  summarise(entropy_guess = calc_entropy(response), .groups = "drop")
+
+# Entropi af gæt samlet på tværs af ALT
+guess_entropy_total <- df %>%
+  summarise(entropy_guess = calc_entropy(response))
+```
+
+```{r}
+# ==========================================
+# Del 3: LOKAL (TRIAL-BY-TRIAL) ENTROPI
+# ==========================================
+
+running_entropy_block <- df %>%
+  # Sørg for at vi kun kigger inden for den enkelte forsøgspersons specifikke blok
+  group_by(participant_id, block_num) %>%
+  # Sørg for at data er sorteret korrekt efter trial-nummer, før vi udregner løbende entropi
+  arrange(trial, .by_group = TRUE) %>%
+  mutate(
+    # Udregn løbende entropi for stimuli (state) og gæt (response)
+    local_stimulus_entropy = calc_running_entropy(state),
+    local_guess_entropy = calc_running_entropy(response)
+  ) %>%
+  ungroup() # Husk at fjerne grupperingen igen
+```
+
+
+```{r}
+# ==========================================
+# DEL 4: KORREKTHED (ACCURACY) AF GÆT
+# ==========================================
+
+# Accuracy pr. enkelt blok
+acc_block <- df %>%
+  group_by(participant_id, block_num, block_type) %>%
+  summarise(accuracy = mean(correct), .groups = "drop")
+
+# Accuracy på tværs af Static vs Dynamic
+acc_type <- df %>%
+  group_by(block_type) %>%
+  summarise(accuracy = mean(correct), .groups = "drop")
+
+# Accuracy samlet for hele forsøget
+acc_total <- df %>%
+  summarise(accuracy = mean(correct))
+
+# Accuracy fordelt på Deviant-typer
+acc_deviant <- df %>%
+  group_by(deviant_possible) %>%
+  summarise(accuracy = mean(correct), .groups = "drop")
+
+# ==========================================
+# ANALYSE: ACCURACY OPDELT PÅ FASE OG BLOKTYPE
+# ==========================================
+
+# 1. Accuracy pr. blok (til plots og t-tests)
+acc_block_detailed <- df %>%
+  group_by(participant_id, block_num, block_phase, block_type, deviant_possible) %>%
+  summarise(accuracy = mean(correct, na.rm = TRUE), .groups = "drop")
+
+# 2. Opsamling: Gennemsnitlig accuracy fordelt på Fase OG Static/Dynamic
+acc_phase_summary <- acc_block_detailed %>%
+  group_by(block_phase, block_type) %>%
+  summarise(
+    mean_accuracy = mean(accuracy),
+    antal_blokke = n(),
+    .groups = "drop"
+  )
+
+print("--- ACCURACY: FASE x BLOKTYPE ---")
+print(acc_phase_summary)
+
+# 3. Opsamling: Accuracy specifikt for de rene sanser (Kun i Phase 1)
+acc_senses_phase1 <- acc_block_detailed %>%
+  filter(block_phase == "Phase 1: Single Deviant") %>%
+  group_by(deviant_possible) %>%
+  summarise(mean_accuracy = mean(accuracy), .groups = "drop")
+
+print("--- ACCURACY: SANSESPECIFIKK (Kun Phase 1) ---")
+print(acc_senses_phase1)
+
+# Udskriv de vigtigste tabeller i konsollen
+print("--- ENTROPI AF STIMULI (Static vs Dynamic) ---")
+print(entropy_per_type)
+
+print("--- ENTROPI AF GÆT (Static vs Dynamic) ---")
+print(guess_entropy_type)
+
+print("--- ACCURACY (Static vs Dynamic) ---")
+print(acc_type)
+```
+
+```{r}
+# ==========================================
+# Del 5: ACCURACY BASERET PÅ DEVIANT TYPER
+# ==========================================
+
+# Beregn accuracy for hver blok, med information om deviant-typen
+acc_block_deviant <- df %>%
+  group_by(participant_id, block_num, deviant_possible) %>%
+  summarise(accuracy = mean(correct, na.rm = TRUE), .groups = "drop")
+
+# Beregn det overordnede gennemsnit på tværs af deviant-kombinationerne
+acc_deviant_summary <- acc_block_deviant %>%
+  group_by(deviant_possible) %>%
+  summarise(
+    mean_accuracy = mean(accuracy),
+    antal_blokke = n(), # Viser hvor mange blokke af denne type I har kørt
+    .groups = "drop"
+  )
+
+print("--- ACCURACY (Fordelt på Deviant Kombinationer) ---")
+print(acc_deviant_summary)
+```
+
+
+```{r}
+# Sæt et pænt tema for alle plots
+theme_set(theme_minimal(base_size = 14))
+
+# PLOT 1: Accuracy fordelt på Static vs Dynamic
+plot_acc <- ggplot(acc_block, aes(x = block_type, y = accuracy, fill = block_type)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5) + # Viser de individuelle blokke som prikker
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  scale_fill_manual(values = c("Static" = "#4285F4", "Dynamic" = "#EA4335")) +
+  labs(
+    title = "Accuracy: Static vs. Dynamic Blocks",
+    x = "Block Type",
+    y = "Accuracy (%)"
+  ) +
+  theme(legend.position = "none")
+
+# PLOT 2: Entropien af forsøgspersonens gæt fordelt på Static vs Dynamic
+plot_guess_entropy <- ggplot(guess_entropy_block, aes(x = block_type, y = entropy_guess, fill = block_type)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  scale_fill_manual(values = c("Static" = "#34A853", "Dynamic" = "#FBBC05")) +
+  labs(
+    title = "Guess Entropy: Static vs. Dynamic Blocks",
+    subtitle = "Higher entropy = more random guessing",
+    x = "Block Type",
+    y = "Shannon Entropy (Bits)"
+  ) +
+  theme(legend.position = "none")
+
+plot_local_entropy <- ggplot(running_entropy_block, aes(x = trial, y = local_stimulus_entropy, color = block_type, fill = block_type)) +
+  # Viser den gennemsnitlige linje pr. trial
+  stat_summary(fun = mean, geom = "line", linewidth = 1) +
+  # Tilføjer et glidende gennemsnit med usikkerhedsbånd (shaded area)
+  geom_smooth(method = "loess", alpha = 0.2, linetype = "dashed") +
+  # Farver
+  scale_color_manual(values = c("Static" = "#4285F4", "Dynamic" = "#EA4335", "Unknown" = "gray")) +
+  scale_fill_manual(values = c("Static" = "#4285F4", "Dynamic" = "#EA4335", "Unknown" = "gray")) +
+  labs(
+    title = "Trial-by-Trial: Lokal Stimulus Entropi",
+    subtitle = "Hvordan entropien (uforudsigeligheden) udvikler sig gennem blokken",
+    x = "Trial Nummer",
+    y = "Løbende Entropi (Bits)",
+    color = "Block Type",
+    fill = "Block Type"
+  ) +
+  theme_minimal(base_size = 14) +
+  # Fjern "Unknown" fra plottet for et renere look (hvis I har sådanne rækker)
+  coord_cartesian(xlim = c(1, max(df$trial, na.rm = TRUE)))
+# ==========================================
+# NYT PLOT: ACCURACY VS DEVIANT KOMBINATIONER
+# ==========================================
+
+plot_deviant_acc <- ggplot(acc_block_deviant, aes(x = deviant_possible, y = accuracy, fill = deviant_possible)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  labs(
+    title = "Accuracy vs. Mulige Afvigere (Deviants)",
+    subtitle = "Hvordan påvirkes forsøgspersonens præcision, når miljøet indeholder flere mulige fejl?",
+    x = "Mulige Deviants i blokken",
+    y = "Accuracy (%)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    # Vip teksten 45 grader så de lange navne kan være der
+    axis.text.x = element_text(angle = 45, hjust = 1) 
+  )
+
+# Vis plots
+print(plot_deviant_acc)
+print(plot_acc)
+print(plot_guess_entropy)
+print(plot_local_entropy)
+```
+
+```{r}
+# ==========================================
+# PLOTS (OPDATERET TIL NYT DESIGN)
+# ==========================================
+
+# PLOT 1: Hovedeffekten - Hvordan påvirker de tre deviants opgaven?
+plot_phase_acc <- ggplot(acc_block_detailed, aes(x = block_type, y = accuracy, fill = block_phase)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
+  geom_jitter(position = position_dodge(width = 0.75), alpha = 0.5) + # Prikker der følger boksene
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  scale_fill_manual(values = c("Phase 1: Single Deviant" = "#34A853", "Phase 2: Multimodal (All Deviants)" = "#FBBC05")) +
+  labs(
+    title = "Accuracy: Single Deviant vs. Multimodal",
+    subtitle = "Falder præcisionen, når hjernen skal overvåge tre typer fejl på én gang?",
+    x = "Miljø (Static vs Dynamic)",
+    y = "Accuracy (%)",
+    fill = "Eksperimentel Fase"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+print(plot_phase_acc)
+
+
+# PLOT 2: Kontrol-tjek - Hvilken sans er sværest at spotte en afviger i? (KUN Phase 1)
+plot_senses <- ggplot(filter(acc_block_detailed, block_phase == "Phase 1: Single Deviant"), 
+                      aes(x = deviant_possible, y = accuracy, fill = deviant_possible)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Baseline Accuracy: Sansespecifikke Afvigere",
+    subtitle = "Data kun fra Blok 1-12 (Én deviant pr. blok)",
+    x = "Deviant Type",
+    y = "Accuracy (%)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+print(plot_senses)
+```
+
+```{r}
+# ==========================================
+# STATISTISKE TESTS (T-TESTS, ANOVA & LMM)
+# ==========================================
+
+# ---------------------------------------------------------
+# TEST 1: Simpel T-test (Static vs. Dynamic overordnet)
+# Undersøger: Er der overordnet forskel på Static og Dynamic uanset fase?
+# ---------------------------------------------------------
+cat("\n--- T-TEST: STATIC VS DYNAMIC (OVERORDNET) ---\n")
+test_static_dynamic <- t.test(accuracy ~ block_type, data = acc_block_detailed)
+print(test_static_dynamic)
+
+
+# ---------------------------------------------------------
+# TEST 2: 2-vejs ANOVA (Fase x Bloktype)
+# Undersøger "Interaktionen": Bliver en 'Dynamic' blok disproportionelt 
+# sværere i Fase 2 (Multimodal) i forhold til Fase 1?
+# ---------------------------------------------------------
+cat("\n--- 2-VEJS ANOVA: FASE x BLOKTYPE ---\n")
+anova_fase_blok <- aov(accuracy ~ block_phase * block_type, data = acc_block_detailed)
+print(summary(anova_fase_blok))
+
+
+# ---------------------------------------------------------
+# TEST 3: 1-vejs ANOVA (Sansespecifikke deviants i Fase 1)
+# Undersøger: Er en af de tre sanser signifikant sværere at gætte end de andre?
+# ---------------------------------------------------------
+cat("\n--- 1-VEJS ANOVA: SANSESPECIFIK (KUN FASE 1) ---\n")
+
+# Filtrer data så vi kun kigger på de rene sanser (Fase 1)
+data_fase1 <- filter(acc_block_detailed, block_phase == "Phase 1: Single Deviant")
+
+anova_sanser <- aov(accuracy ~ deviant_possible, data = data_fase1)
+print(summary(anova_sanser))
+
+# Kør en post-hoc test for at se PRÆCIS hvilke sanser der adskiller sig 
+# (f.eks. om SV er signifikant sværere end AS). Vises kun ordentligt hvis ANOVA'en er signifikant.
+cat("\n--- POST-HOC TEST FOR SANSER (Tukey HSD) ---\n")
+print(TukeyHSD(anova_sanser))
+
+
+# ---------------------------------------------------------
+# TEST 4 (EM3 GULDSTANDARD): Linear Mixed Effects Model
+# NB: Kræver at I har installeret pakkerne 'lme4' og 'lmerTest'
+# ---------------------------------------------------------
+ library(lme4)
+ library(lmerTest)
+ 
+cat("\n--- LINEAR MIXED MODEL (LMM) ---\n")
+lmm_model <- lmer(accuracy ~ block_phase * block_type + (1 | participant_id), data = acc_block_detailed)
+print(summary(lmm_model))
+```
+
